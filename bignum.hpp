@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <openssl/bn.h>
+#include <uint256.h>
 
 #include "serialize.hpp"
 

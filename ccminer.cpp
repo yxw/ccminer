@@ -81,7 +81,9 @@ struct workio_cmd {
 };
 
 bool opt_debug = false;
-bool opt_debug_diff = false;
+//bool opt_debug_diff = false;
+bool opt_debug_diff = true;
+
 bool opt_debug_threads = false;
 bool opt_protocol = false;
 bool opt_benchmark = false;
@@ -395,8 +397,8 @@ static char const short_options[] =
 
 struct option options[] = {
 	{ "algo", 1, NULL, 'a' },
-	{ "api-bind", 1, NULL, 'b' },
-	{ "api-remote", 0, NULL, 1030 },
+	//{ "api-bind", 1, NULL, 'b' },
+	//{ "api-remote", 0, NULL, 1030 },
 	{ "api-allow", 1, NULL, 1031 },
 	{ "api-groups", 1, NULL, 1032 },
 	{ "api-mcast", 0, NULL, 1033 },
@@ -470,7 +472,8 @@ struct option options[] = {
 	{ "threads", 1, NULL, 't' },
 	{ "vote", 1, NULL, 1022 },
 	{ "trust-pool", 0, NULL, 1023 },
-	{ "timeout", 1, NULL, 'T' },
+	//{ "timeout", 1, NULL, 'T' }, // to be compatible with Multiminer
+	{ "text-only", 0, NULL, 'T' }, //to be compatible with Multiminer 
 	{ "url", 1, NULL, 'o' },
 	{ "user", 1, NULL, 'u' },
 	{ "userpass", 1, NULL, 'O' },
@@ -479,6 +482,11 @@ struct option options[] = {
 	{ "diff-multiplier", 1, NULL, 'm' },
 	{ "diff-factor", 1, NULL, 'f' },
 	{ "diff", 1, NULL, 'f' }, // compat
+	// for MultiMiner
+	{ "api-port", 1, NULL, 'b' }, // equal to api-bind
+	{ "api-listen", 0, NULL, 1030 }, // equla to api-remote
+	{ "log", 1, NULL, 2001 }, // do nothing (ccminer dont' have log config yet)
+
 	{ 0, 0, 0, 0 }
 };
 
@@ -3366,10 +3374,11 @@ void parse_arg(int key, char *arg)
 		opt_scantime = v;
 		break;
 	case 'T':
-		v = atoi(arg);
-		if (v < 1 || v > 99999)	/* sanity check */
-			show_usage_and_exit(1);
-		opt_timeout = v;
+		//v = atoi(arg);
+		//if (v < 1 || v > 99999)	/* sanity check */
+		//	show_usage_and_exit(1);
+		//opt_timeout = v;
+		printf("-T parameter is ignored.\n");
 		break;
 	case 't':
 		v = atoi(arg);
@@ -3807,6 +3816,9 @@ void parse_arg(int key, char *arg)
 		show_version_and_exit();
 	case 'h':
 		show_usage_and_exit(0);
+	case 2001:
+		printf("--log parameter is ignored.\n");
+		break;
 	default:
 		show_usage_and_exit(1);
 	}

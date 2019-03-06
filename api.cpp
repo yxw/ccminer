@@ -49,6 +49,8 @@
 # define SOCKETINIT {}
 # define SOCKERRMSG strerror(errno)
 #else
+# include <Ws2ipdef.h>	/*mcast::ip_mreq*/
+# include <WS2tcpip.h> /* socklen_t */
 # define SOCKETTYPE SOCKET
 # define SOCKETFAIL(a) ((a) == SOCKET_ERROR)
 # define INVSOCK INVALID_SOCKET
@@ -477,7 +479,216 @@ static char *remote_quit(char *params)
 	return buffer;
 }
 
+/****************** MultiMiner commands support ******************/
+
+/* Multiminer "quit" command */
+static char *quit_mm(char *params)
+{
+	*buffer = '\0';
+	bye = 1;
+	sprintf(buffer, "%s", "quit");
+	return buffer;
+}
+
+/* 
+* Multiminer "restart" command  (not supported yet)
+*/
+static char *restart_mm(char *params)
+{
+	//TODO: ccminer does not support remote restart command
+	// here just send the "restart" command but do nothing
+	*buffer = '\0';
+	sprintf(buffer, "%s", "restart");
+	return buffer;
+}
+
+static char *switchpool_mm(char *params) 
+{
+	return remote_switchpool(params);
+}
+
+
+/* Multiminer "version" command */
+static char *getversion_mm(char *params) 
+{
+	char algo[64] = { 0 };
+	*buffer = '\0';
+	sprintf(buffer, "Msg=%s,Description=ccminer,CGMiner=%s,API=%s|"
+		PACKAGE_NAME, PACKAGE_VERSION, APIVERSION);
+	return buffer;
+}
+
+static char *getsummary_mm(char *params)
+{
+	char algo[64] = { 0 };
+	time_t ts = time(NULL);
+	double accps, uptime = difftime(ts, startup);
+	uint32_t wait_time = 0, solved_count = 0;
+	uint32_t accepted_count = 0, rejected_count = 0;
+	for (int p = 0; p < num_pools; p++) {
+		wait_time += pools[p].wait_time;
+		accepted_count += pools[p].accepted_count;
+		rejected_count += pools[p].rejected_count;
+		solved_count += pools[p].solved_count;
+	}
+	accps = (60.0 * accepted_count) / (uptime ? uptime : 1.0);
+
+	get_currentalgo(algo, sizeof(algo));
+
+	*buffer = '\0';
+	sprintf(buffer, "NAME=%s,VER=%s,API=%s,"
+		"ALGO=%s,GPUS=%d,Total MH=%.2f,"
+		"Solved=%d,Accepted=%d,Rejected=%d,"
+		"ACCMN=%,3f,DIFF=%.6f,NETKHS=%.0f,"
+		"POOLS=%u,WAIT=%u,Elapsed=%.0f,TS=%u|",
+		PACKAGE_NAME, PACKAGE_VERSION, APIVERSION,
+		algo, active_gpus, (double)global_hashrate / 1000000.,
+		solved_count, accepted_count, rejected_count,
+		accps, net_diff > 1e-6 ? net_diff : stratum_diff, (double)net_hashrate / 1000.,
+		num_pools, wait_time, uptime, (uint32_t) ts);
+	return buffer;
+
+}
+
+static char *getstats_mm(char *params)
+{
+	char algo[64] = { 0 };
+	time_t ts = time(NULL);
+	double accps, uptime = difftime(ts, startup);
+
+	*buffer = '\0';
+	sprintf(buffer, "Elapsed=%.0f|", uptime);
+	return buffer;
+}
+
+static void poolinfo_mm(int pooln)
+{
+	char buf[512]; *buf = '\0';
+	char jobid[128] = { 0 };
+	char extra[96] = { 0 };
+	//int pooln = params ? atoi(params) % num_pools : cur_pooln;
+	struct pool_infos *p = &pools[pooln];
+	uint32_t last_share = 0;
+	if (p->last_share_time)
+		last_share = (uint32_t) (time(NULL) - p->last_share_time);
+
+
+	bool has_stratum = p->type & POOL_STRATUM;
+	bool long_poll = p->type & POOL_LONGPOLL;
+
+	snprintf(buf, sizeof(buf), "POOL=%s,URL=%s,Last Share Time=%u,"
+		"Accpeted=%d,Rejected=%d,Stale=%u,"
+		"User=%s,Has Stratum=%s,Long Pool=%s,"
+		"BEST=%.6f|",
+		pooln, p->url, last_share,
+		p->accepted_count, p->rejected_count, p->stales_count,
+		p->user, has_stratum ? "true" : "false", long_poll ? "y" : "n",
+		p->best_share);
+	strcat(buffer, buf);
+}
+
+static char *getpools_mm(char *params)
+{
+	*buffer = '\0';
+	for (int i = 0; i < MAX_POOLS; i++)
+		poolinfo_mm(i);
+	return buffer;
+}
+
+
+
+static char *getcoin_mm(char *params)
+{
+	char algo[64] = { 0 };
+	get_currentalgo(algo, sizeof(algo));
+
+	*buffer = '\0';
+	sprintf(buffer, "Hash Method=%s,Current Block Time=0,Current Block Hash=,LP=true,Network Difficulty=%.6f|",
+		algo, net_diff); // net_diff > 1e-6 ? net_diff : stratum_diff);
+	return buffer;
+}
+
+/**
+* equivilant to "devdetails" of BFGMiner
+*/
+static char *getdevdetails_mm(char *params)
+{
+	*buffer = '\0';
+	//for (int i = 0; i < cuda_num_devices(); i++)
+	//	gpuhwinfos(i);
+
+	char buf[256];
+	memset(buf, 0, sizeof(buf));
+	snprintf(buf, sizeof(buf), "DEVDETAILS=0,Name=Nvidia,ID=0,Driver=%s|", driver_version);
+
+	strcat(buffer, buf);
+	return buffer;
+}
+
+static void devs_mm(int thr_id)
+{
+	struct pool_infos *p = &pools[cur_pooln];
+
+	if (thr_id >= 0 && thr_id < opt_n_threads) {
+		struct cgpu_info *cgpu = &thr_info[thr_id].gpu;
+		double khashes_per_watt = 0;
+		int gpuid = cgpu->gpu_id;
+		char buf[512]; *buf = '\0';
+		char* card;
+
+		cuda_gpu_info(cgpu);
+		cgpu->gpu_plimit = device_plimit[cgpu->gpu_id];
+
+#ifdef USE_WRAPNVML
+		cgpu->has_monitoring = true;
+		cgpu->gpu_bus = gpu_busid(cgpu);
+		cgpu->gpu_temp = gpu_temp(cgpu);
+		cgpu->gpu_fan = (uint16_t) gpu_fanpercent(cgpu);
+		cgpu->gpu_fan_rpm = (uint16_t) gpu_fanrpm(cgpu);
+		cgpu->gpu_power = gpu_power(cgpu); // mWatts
+		cgpu->gpu_plimit = gpu_plimit(cgpu); // mW or %
+#endif
+		cgpu->khashes = stats_get_speed(thr_id, 0.0) / 1000.0;
+		if (cgpu->monitor.gpu_power) {
+			cgpu->gpu_power = cgpu->monitor.gpu_power;
+			khashes_per_watt = (double)cgpu->khashes / cgpu->monitor.gpu_power;
+			khashes_per_watt *= 1000; // power in mW
+			//gpulog(LOG_BLUE, thr_id, "KHW: %g", khashes_per_watt);
+		}
+
+		card = device_name[gpuid];
+
+		// fan percent is cgpu->gpu_fan
+		// Use gpu_power(in mWatts) as the "GPU Voltage" in MultiMiner
+		snprintf(buf, sizeof(buf), "GPU=%d,ID=%d,Name=%s,Temperature=%.1f,"
+			"GPU Voltage=%u,Fan Percent=%hu,Fan Speed=%hu,"
+			"GPU Clock=%u,Memory Clock=%u,1s=%.2f," 
+			//;KHW=%.5f;PLIM=%u;"
+			"Accepted=%u,Rejected=%u,Hardware Errors=%u,Intensity=%.1f|",
+			//;THR=%u|",
+			thr_id, gpuid, card, cgpu->gpu_temp,
+			cgpu->gpu_power, cgpu->gpu_fan, cgpu->gpu_fan_rpm,
+			//cgpu->gpu_clock, cgpu->gpu_memclock, // base freqs in MHz
+			cgpu->monitor.gpu_clock, cgpu->monitor.gpu_memclock, // current
+			cgpu->khashes*1000.0, //khashes_per_watt, cgpu->gpu_plimit,
+			cgpu->accepted, (unsigned) cgpu->rejected, (unsigned) cgpu->hw_errors,
+			cgpu->intensity); // , cgpu->throughput);
+
+		// append to buffer for multi gpus
+		strcat(buffer, buf);
+	}
+}
+
+static char *getdevs_mm(char *params)
+{
+	*buffer = '\0';
+	for (int i = 0; i < opt_n_threads; i++)
+		devs_mm(i);
+	return buffer;
+}
+
 /*****************************************************************************/
+
 
 static char *gethelp(char *params);
 struct CMDS {
@@ -485,7 +696,21 @@ struct CMDS {
 	char *(*func)(char *);
 	bool iswritemode;
 } cmds[] = {
-	{ "summary", getsummary, false },
+	/* MultiMiner compliant commands */
+	{ "devs", getdevs_mm, false },
+	{ "devdetails", getdevdetails_mm, false },
+	{ "summary", getsummary_mm, false },
+	{ "pools", getpools_mm, false },
+	{ "version", getversion_mm, false },
+	{ "coin", getcoin_mm, false },
+	{ "stats", getstats_mm, false },
+	// control commands
+	{ "quit", quit_mm, true },
+	{ "restart", restart_mm, true },
+	{ "switchpool|", switchpool_mm, true },
+
+	// comment out the commands that are conflicts with MultiMiner
+	//{ "summary", getsummary, false },
 	{ "threads", getthreads, false },
 	{ "pool",    getpoolnfo, false },
 	{ "histo",   gethistory, false },
@@ -495,8 +720,8 @@ struct CMDS {
 
 	/* remote functions */
 	{ "seturl",  remote_seturl, true }, /* prefer switchpool, deprecated */
-	{ "switchpool", remote_switchpool, true },
-	{ "quit", remote_quit, true },
+	//{ "switchpool", remote_switchpool, true },
+	//{ "quit", remote_quit, true },
 
 	/* keep it the last */
 	{ "help",    gethelp, false },
@@ -597,7 +822,8 @@ static size_t base64_encode(const uchar *indata, size_t insize, char *outptr, si
 	return len;
 }
 
-#include "compat/curl-for-windows/openssl/openssl/crypto/sha/sha.h"
+//#include "compat/curl-for-windows/openssl/openssl/crypto/sha/sha.h"
+#include "compat/curl-for-windows/openssl/openssl/include/openssl/sha.h"
 
 /* websocket handshake (tested in Chrome) */
 static int websocket_handshake(SOCKETTYPE c, char *result, char *clientkey)
@@ -1266,16 +1492,21 @@ static void api()
 			//if (opt_debug && opt_protocol && n > 0)
 			//	applog(LOG_DEBUG, "API: recv command: (%d) '%s'+char(%x)", n, buf, buf[n-1]);
 
+			// Change it to MultiMiner compitable !
+
 			if (!fail) {
 				char *msg = NULL;
 				/* Websocket requests compat. */
-				if ((msg = strstr(buf, "GET /")) && strlen(msg) > 5) {
+				//if ((msg = strstr(buf, "GET /")) && strlen(msg) > 5) {
+				if ((msg = buf) && strlen(msg) > 5) {
 					char cmd[256] = { 0 };
 					sscanf(&msg[5], "%s\n", cmd);
-					params = strchr(cmd, '/');
+					//params = strchr(cmd, '/');
+					params = strchr(cmd, '|');
 					if (params)
 						*(params++) = '|';
-					params = strchr(cmd, '/');
+					//params = strchr(cmd, '/');
+					params = strchr(cmd, '|');
 					if (params)
 						*(params++) = '\0';
 					wskey = strstr(msg, "Sec-WebSocket-Key");

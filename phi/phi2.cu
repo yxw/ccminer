@@ -43,6 +43,9 @@ static uint32_t* d_hash_512[MAX_GPUS];
 static uint64_t* d_hash_256[MAX_GPUS];
 static uint32_t* d_hash_br2[MAX_GPUS];
 static uint32_t* d_nonce_br[MAX_GPUS];
+// Fix "undefined d_hash"
+static uint32_t *d_hash[MAX_GPUS];
+
 
 static bool has_roots;
 
